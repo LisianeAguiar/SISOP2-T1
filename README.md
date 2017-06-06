@@ -1,2 +1,0 @@
-# SISOP2
-DropC
