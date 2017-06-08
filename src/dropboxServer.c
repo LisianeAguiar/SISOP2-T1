@@ -18,13 +18,14 @@
 #define PORT 4000
 
 struct client_list *client_list;
+int writing = 0;
 
 int main()
 {
-  int serverSockfd, newsockfd;
+  int serverSockfd, newsockfd, thread;
   socklen_t cliLen;
   struct sockaddr_in serv_addr, cli_addr;
-  pthread_t clientThread;
+  pthread_t clientThread, syncThread;
 
   // inicializa lista
   newList(client_list);
@@ -40,7 +41,7 @@ int main()
   // inicializa estrutura do serv_addr
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(PORT);
-  serv_addr.sin_addr.s_addr = INADDR_ANY;
+  serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
   bzero(&(serv_addr.sin_zero), 8);
 
   // associa o descritor do socket a estrutura
@@ -62,11 +63,25 @@ int main()
       printf("ERROR on accept\n");
       return -1;
     }
-    // cria thread para atender o cliente
-    if(pthread_create(&clientThread, NULL, client_thread, &newsockfd))
+
+    read(newsockfd, &thread, sizeof(thread));
+
+    if (thread)
     {
-      printf("ERROR creating thread\n");
-      return -1;
+      // cria thread para atender o cliente
+      if(pthread_create(&clientThread, NULL, client_thread, &newsockfd))
+      {
+        printf("ERROR creating thread\n");
+        return -1;
+      }
+    }
+    else
+    {
+      if(pthread_create(&syncThread, NULL, sync_thread_sv, &newsockfd))
+      {
+        printf("ERROR creating sync thread\n");
+        return -1;
+      }
     }
   }
 }
@@ -75,6 +90,7 @@ int initializeClient(int client_socket, char *userid, struct client *client)
 {
   struct client_list *client_node;
   struct stat sb;
+  int i;
 
   // não encontrou na lista ---- NEW CLIENT
   if (!findNode(userid, client_list, &client_node))
@@ -83,6 +99,10 @@ int initializeClient(int client_socket, char *userid, struct client *client)
     client->devices[1] = -1;
     strcpy(client->userid, userid);
 
+    for(i = 0; i < MAXFILES; i++)
+    {
+      client->file_info[i].size = -1;
+    }
     client->logged_in = 1;
 
     // insere cliente na lista de client
@@ -126,6 +146,43 @@ int initializeClient(int client_socket, char *userid, struct client *client)
   return 1;
 }
 
+void *sync_thread_sv(void *socket)
+{
+  int byteCount, connected;
+  int *client_socket = (int*)socket;
+  char userid[MAXNAME];
+  struct client client;
+
+  // lê os dados de um cliente
+  byteCount = read(*client_socket, userid, MAXNAME);
+
+  // erro de leitura
+  if (byteCount < 1)
+    printf("ERROR reading from socket\n");
+
+  listen_sync(*client_socket, userid);
+}
+
+void listen_sync(int client_socket, char *userid)
+{
+  int byteCount, command;
+  struct client_request clientRequest;
+
+  do
+  {
+      byteCount = read(client_socket, &clientRequest, sizeof(clientRequest));
+
+      switch (clientRequest.command)
+      {
+        case UPLOAD: receive_file(clientRequest.file, client_socket, userid); break;
+        case DOWNLOADALL: send_all_files(client_socket, userid); break;
+        case DELETE: delete_file(clientRequest.file, client_socket, userid);
+        case EXIT: ;break;
+        default: break;
+      }
+  } while(clientRequest.command != EXIT);
+}
+
 void *client_thread (void *socket)
 {
   int byteCount, connected;
@@ -158,6 +215,8 @@ void *client_thread (void *socket)
     byteCount = write(*client_socket, &connected, sizeof(int));
     if (byteCount < 0)
       printf("ERROR sending connected message\n");
+
+    return NULL;
   }
 
   listen_client(*client_socket, userid);
@@ -172,26 +231,44 @@ void listen_client(int client_socket, char *userid)
   {
       byteCount = read(client_socket, &clientRequest, sizeof(clientRequest));
 
-      printf("client: %d", clientRequest.command);
-
       if (byteCount < 0)
         printf("ERROR listening to the client\n");
 
       switch (clientRequest.command)
       {
         case LIST: send_file_info(client_socket, userid); break;
-        case SYNC: sync_server(client_socket, userid);break;
         case DOWNLOAD: send_file(clientRequest.file, client_socket, userid); break;
         case UPLOAD: receive_file(clientRequest.file, client_socket, userid); break;
-        case EXIT: break;
-        default: printf("ERROR invalid command\n");
+        case EXIT: close_client_connection(client_socket, userid);break;
+  //      default: printf("ERROR invalid command\n");
       }
-  } while(1);
+  } while(clientRequest.command != EXIT);
 }
 
-void sync_server(int socket, char *userid)
+void close_client_connection(int socket, char *userid)
 {
+  struct client_list *client_node;
+	int i, fileNum = 0;
 
+  printf("Disconnecting %s\n", userid);
+
+	if (findNode(userid, client_list, &client_node))
+	{
+    if(client_node->client.devices[0] == FREEDEV)
+    {
+      client_node->client.devices[1] = FREEDEV;
+      client_node->client.logged_in = 0;
+    }
+    else if (client_node->client.devices[1] == FREEDEV)
+    {
+      client_node->client.devices[0] = FREEDEV;
+      client_node->client.logged_in = 0;
+    }
+    else if (client_node->client.devices[0] == socket)
+      client_node->client.devices[0] = FREEDEV;
+    else
+      client_node->client.devices[1] = FREEDEV;
+  }
 }
 
 void send_file_info(int socket, char *userid)
@@ -219,6 +296,28 @@ void send_file_info(int socket, char *userid)
 	}
 }
 
+void delete_file(char *file, int socket, char *userid)
+{
+  int byteCount;
+  FILE *ptrfile;
+  char path[200];
+  struct file_info file_info;
+
+  strcpy(path, userid);
+  strcat(path, "/");
+  strcat(path, file);
+
+  if(remove(path) != 0)
+  {
+    printf("Error: unable to delete the %s file\n", file);
+  }
+
+  strcpy(file_info.name, file);
+  file_info.size = -1;
+
+  updateFileInfo(userid, file_info);
+}
+
 void receive_file(char *file, int socket, char*userid)
 {
   int byteCount, bytesLeft, fileSize;
@@ -236,11 +335,24 @@ void receive_file(char *file, int socket, char*userid)
       // escreve número de bytes do arquivo
       byteCount = read(socket, &fileSize, sizeof(fileSize));
 
+      if (fileSize == 0)
+      {
+        fclose(ptrfile);
+
+      	strcpy(file_info.name, file);
+        strcpy(file_info.last_modified, ctime(&now));
+        file_info.lst_modified = now;
+        file_info.size = fileSize;
+
+      	updateFileInfo(userid, file_info);
+        return;
+      }
+
       bytesLeft = fileSize;
 
       while(bytesLeft > 0)
       {
-        // lê 1kbyte de dados do arquivo do servidor
+        	// lê 1kbyte de dados do arquivo do servidor
     		byteCount = read(socket, dataBuffer, KBYTE);
 
     		// escreve no arquivo do cliente os bytes lidos do servidor
@@ -284,11 +396,65 @@ void updateFileInfo(char *userid, struct file_info file_info)
     for(i = 0; i < MAXFILES; i++)
     {
       if(client_node->client.file_info[i].size == -1)
+      {
         client_node->client.file_info[i] = file_info;
+        break;
+      }
     }
   }
 }
 
+void send_all_files(int client_socket, char *userid)
+{
+  int byteCount, bytesLeft, fileSize, fileNum=0, i;
+  FILE* ptrfile;
+  char dataBuffer[KBYTE], path[KBYTE];
+  struct client_list *client_node;
+
+  if (findNode(userid, client_list, &client_node))
+  {
+    for(i = 0; i < MAXFILES; i++)
+    {
+      if (client_node->client.file_info[i].size != -1)
+        fileNum++;
+    }
+  }
+
+  write(client_socket, &fileNum, sizeof(fileNum));
+
+  for(i = 0; i < MAXFILES; i++)
+  {
+    if (client_node->client.file_info[i].size != -1)
+    {
+      strcpy(path, userid);
+      strcat(path, "/");
+      strcat(path, client_node->client.file_info[i].name);
+
+      write(client_socket, client_node->client.file_info[i].name, MAXNAME);
+
+      if (ptrfile = fopen(path, "rb"))
+      {
+          fileSize = getFileSize(ptrfile);
+
+          // escreve estrutura do arquivo no servidor
+          byteCount = write(client_socket, &fileSize, sizeof(int));
+
+          if (fileSize > 0)
+          {
+            while(!feof(ptrfile))
+            {
+                fread(dataBuffer, sizeof(dataBuffer), 1, ptrfile);
+
+                byteCount = write(client_socket, dataBuffer, KBYTE);
+                if(byteCount < 0)
+                  printf("ERROR sending file\n");
+            }
+          }
+          fclose(ptrfile);
+      }
+    }
+  }
+}
 
 void send_file(char *file, int socket, char *userid)
 {
@@ -356,8 +522,14 @@ void initializeClientList()
           if (userDir)
           {
             for(i = 0; i < MAXFILES; i++)
+            {
               client.file_info[i].size = -1;
-
+              if (pthread_mutex_init(&client.file_info[i].file_mutex, NULL) != 0)
+              {
+                  printf("\n mutex init failed\n");
+                  return 1;
+              }
+            }
             i = 0;
             while((userDirent = readdir(userDir)) != NULL)
             {
