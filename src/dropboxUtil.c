@@ -76,7 +76,7 @@ int getFileSize(FILE *ptrfile)
 
 int commandRequest(char *request, char *file)
 {
-	char *requestAux;
+	char *requestAux, *fileAux;
 	int strLen;
 
 	strLen = strlen(request);
@@ -94,7 +94,13 @@ int commandRequest(char *request, char *file)
 		return SYNC;
 
 	requestAux = strtok(request, " ");
-	strcpy(file, strtok(NULL, "\n"));
+	//if (requestAux != NULL)
+	//puts("AAA");
+	fileAux = strtok(NULL, "\n");
+	if (fileAux != NULL)
+		strcpy(file, fileAux);
+	else
+		return -1;
 
 	if (file != NULL)
 	{
@@ -130,6 +136,17 @@ time_t getFileModifiedTime(char *path)
     if (stat(path, &attr) == 0)
     {
         return attr.st_mtime;
+    }
+    return 0;
+}
+
+int exists(const char *fname)
+{
+    FILE *file;
+    if (file = fopen(fname, "rb"))
+    {
+        fclose(file);
+        return 1;
     }
     return 0;
 }
