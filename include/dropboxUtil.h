@@ -2,6 +2,8 @@
 #include <time.h>
 
 #define KBYTE 1024
+#define DELETE 6
+#define DOWNLOADALL 5
 #define EXIT 4
 #define SYNC 3
 #define LIST 2
@@ -17,3 +19,4 @@ int getFileSize(FILE* ptrfile);
 int commandRequest(char *request, char*file);
 void getFilename(char *pathname, char *filename);
 time_t getFileModifiedTime(char *path);
+int exists(const char *fname);
